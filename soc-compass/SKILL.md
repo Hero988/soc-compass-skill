@@ -222,78 +222,133 @@ If the new alert is clearly part of an already-investigated incident (same host,
 4. Post verdict and report as additional messages in the same conversation
 5. Only create a new conversation if the alert is on a different host or a genuinely separate incident
 
-## Alert queue workflow
+## Alert queue workflow (queue-centric — all data goes to the queue)
 
-Alerts are managed via a Convex-backed queue. Users submit alerts via the **frontend Agent Dashboard** or via the **API**. The AI processes them one at a time, checking the queue after each investigation.
+All investigation data goes directly to the alert queue item — **not** to conversations. The Agent Dashboard on the frontend auto-updates in real-time as you work.
 
 ### Starting an investigation session
 
 1. **Check the queue for pending alerts:**
 ```bash
-curl -s "$API/workspaces/{wsId}/queue?status=pending" -H "Authorization: Bearer $KEY"
+curl -s "$API/workspaces/{wsId}/queue/next" -H "Authorization: Bearer $KEY"
 ```
 
-2. **If pending alerts exist, claim the next one:**
+2. **Claim the alert:**
 ```bash
-curl -s -X PATCH "$API/queue/{queueItemId}/claim" \
-  -H "Authorization: Bearer $KEY"
+curl -s -X PATCH "$API/queue/{queueItemId}/claim" -H "Authorization: Bearer $KEY"
 ```
-This marks it as "processing" — the frontend Agent Dashboard shows it instantly.
+Dashboard shows "Processing" instantly. The response includes the `siemProvider` from the workspace.
 
-3. **Create a conversation and investigate** (follow the standard investigation flow: schema discovery → queries → analysis → classification)
-
-4. **Write verdict:**
+3. **Post progress as you work** (each step appears live on the dashboard):
 ```bash
-curl -s -X POST "$API/conversations/{convId}/verdict" \
+curl -s -X PATCH "$API/queue/{queueItemId}/progress" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"eventId": "{alertId}", "verdict": "True Positive", "confidence": 92, "severity": "high", "escalationRequired": true, "classificationRationale": "..."}'
+  -d '{"step": "schema_discovery", "status": "running", "title": "Running schema discovery query"}'
+```
+When a step completes, post again with `"status": "complete"` and optionally `"detail": "Found 595 events, index=main, sourcetype=_json"`.
+
+4. **Investigate** (schema discovery → queries → analysis → classification). Post progress for each major step.
+
+5. **Save IOCs as you find them:**
+```bash
+curl -s -X PATCH "$API/queue/{queueItemId}/iocs" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"iocs": [{"value": "103.131.189.2", "type": "ip", "verdict": "malicious", "context": "C2 server"}], "append": true}'
 ```
 
-5. **Post report** (use the heredoc + Node.js file-based method for Windows)
+6. **Save MITRE techniques:**
+```bash
+curl -s -X PATCH "$API/queue/{queueItemId}/mitre" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"techniques": [{"techniqueId": "T1053.005", "name": "Scheduled Task", "tactic": "Persistence", "evidence": "..."}], "append": true}'
+```
 
-6. **Mark queue item complete:**
+7. **Save investigation report** (use heredoc + Node.js file method for Windows paths):
+```bash
+curl -s -X PATCH "$API/queue/{queueItemId}/report" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d @"$PAYLOAD_PATH"
+```
+Where the payload JSON is `{"report": "# Investigation Report..."}`.
+
+8. **Save agent context** (schema, investigation state for resume):
+```bash
+curl -s -X PATCH "$API/queue/{queueItemId}/context" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"schema": {...}, "queriesRun": [...], "investigationPhase": "completed"}'
+```
+
+9. **Mark complete with verdict:**
 ```bash
 curl -s -X PATCH "$API/queue/{queueItemId}/complete" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"verdict": "True Positive", "verdictConfidence": 92, "conversationId": "{convId}"}'
+  -d '{"verdict": "True Positive", "verdictConfidence": 92, "escalationRequired": true, "classificationRationale": "...", "queriesExecuted": 5, "agentSource": "claude-code"}'
 ```
-The frontend shows the alert as completed with the verdict.
 
-7. **Check for more pending alerts:**
+10. **Check for more:**
 ```bash
 curl -s "$API/workspaces/{wsId}/queue/next" -H "Authorization: Bearer $KEY"
 ```
-If `empty: true` → "All alerts processed. Queue is empty."
+If `empty: true` → "All alerts processed."
 If an alert exists → go to step 2.
 
 ### Users can submit alerts anytime
 
-Users add alerts to the queue via:
-- **Frontend:** Workspace → Agent Dashboard → Submit Alert button
-- **API:**
+Via frontend Agent Dashboard or API:
 ```bash
 curl -s -X POST "$API/workspaces/{wsId}/queue" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"alertId": "1024", "alertTitle": "Scheduled Task", "alertSeverity": "medium", "alertData": "...full alert text..."}'
+  -d '{"alertId": "1024", "alertTitle": "Scheduled Task", "alertSeverity": "medium", "alertData": "..."}'
 ```
 
-The AI picks them up after completing the current investigation. Users don't need to wait.
+### Linked / related alerts
 
-### Linked / related alerts (same host or incident)
-
-When a new alert is on the same host, same timeframe, or same attack chain:
-- **Append to the existing conversation** (Scenario E) — don't create a new one
-- **Skip schema discovery** — already cached in context
-- **Check prior findings first** — classify immediately if activity was already investigated
-- **Cross-reference evidence** — IOCs, processes, and timelines from prior alerts
+When a new alert is on the same host/attack chain:
+- Reuse cached schema from context
+- Check prior findings before running new queries
+- Cross-reference IOCs and timelines from prior alerts
 - Schema discovery only needs to happen ONCE per workspace
 
-### Completion signals
+### Recommended query sequence (process-based alerts)
 
-After each alert investigation, clearly signal:
-> "Alert {ID} investigation complete. Verdict: {verdict}. Ready for the next alert."
+For most alerts, follow this order:
+1. **Process tree:** All process creation events on the host (Sysmon EventCode 1) — full timeline
+2. **Network:** All outbound connections from the host (Sysmon EventCode 3) — C2 detection
+3. **File activity:** File creates/deletes (Sysmon EventCode 11) — staging, drops
+4. **Registry:** Registry modifications (Sysmon EventCode 13) — persistence
+5. **DNS:** DNS queries (Sysmon EventCode 22) — domain IOCs
 
-Then immediately check the queue for more pending alerts.
+Queries 1-2 are usually sufficient for classification. Queries 3-5 are for enrichment.
+
+### Schema analysis tip
+
+Schema discovery results themselves may reveal IOCs. The `fieldsummary` output shows top values per field — unusual process names, suspicious paths, or unexpected hosts in the top values are worth noting immediately.
+
+### Severity upgrade criteria
+
+- **Low → Medium:** Suspicious activity confirmed but no active exploitation
+- **Medium → High:** Active exploitation confirmed (code execution, credential access)
+- **Medium/High → Critical:** Active C2 communication, data exfiltration, or lateral movement
+- Always note the upgrade: "Severity: Medium (upgraded to Critical based on...)"
+
+### Windows path escaping in context/IOC saves
+
+Context and IOC payloads often contain Windows paths (`C:\ProgramData\Media\svchost.exe`). Use Node.js **object literals** with `String.fromCharCode(92)` for backslashes:
+
+```bash
+CTX_PATH="$(cygpath -w "$TEMP/ctx_payload.json")"
+node -e "
+var bs = String.fromCharCode(92);
+var payload = {
+  schema: {provider: 'splunk'},
+  iocs: {files: ['C:' + bs + 'ProgramData' + bs + 'Media' + bs + 'svchost.exe']}
+};
+require('fs').writeFileSync(process.argv[1], JSON.stringify(payload));
+" "$CTX_PATH"
+curl -s -X PATCH "$API/queue/$QID/context" -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d @"$CTX_PATH"
+```
+
+**Rule:** ANY payload with Windows paths must use Node.js object literals. Never JSON string literals or heredocs with backslashes.
 
 ## Asking the user for information (HITL mode — default)
 
@@ -510,13 +565,20 @@ Full guide: `references/siem-query-guides.md`
 | `GET` | `/workspaces/:wsId/queue` | List queue (?status=pending/completed/all) |
 | `GET` | `/workspaces/:wsId/queue/next` | Get next pending alert |
 | `PATCH` | `/queue/:id/claim` | Mark alert as processing |
-| `PATCH` | `/queue/:id/complete` | Mark alert as completed (with verdict) |
+| `PATCH` | `/queue/:id/complete` | Mark completed (verdict, escalation, duration, queries) |
 | `PATCH` | `/queue/:id/fail` | Mark alert as failed |
+| `PATCH` | `/queue/:id/progress` | Add/update investigation progress step |
+| `GET` | `/queue/:id/progress` | Get all progress steps |
+| `PATCH` | `/queue/:id/report` | Save investigation report |
+| `PATCH` | `/queue/:id/iocs` | Add/update IOCs (append: true to add without replacing) |
+| `PATCH` | `/queue/:id/mitre` | Add/update MITRE techniques (append: true) |
+| `PATCH` | `/queue/:id/context` | Save agent context (schema, state) |
+| `GET` | `/queue/:id/detail` | Get full investigation detail |
 | `DELETE` | `/queue/:id` | Remove from queue |
 
 All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 
-**Verdict POST behavior:** If a verdict already exists for the same eventId in the conversation, it will be updated (upsert). You can safely re-post a verdict to correct it.
+**Queue-centric flow:** All investigation data (report, IOCs, MITRE, progress, context) goes to the queue item. The Agent Dashboard reads everything from the queue. Conversations are optional/legacy.
 
 ## Error codes
 
