@@ -9,13 +9,13 @@ An [Agent Skill](https://agentskills.io) that enables AI agents to conduct secur
 **Git Bash / macOS / Linux:**
 
 ```bash
-mkdir -p ~/.claude/skills/soc-compass && curl -sL https://raw.githubusercontent.com/Hero988/soc-compass-skill/master/soc-compass/SKILL.md -o ~/.claude/skills/soc-compass/SKILL.md
+mkdir -p ~/.claude/skills/soc-compass && curl -sL "https://raw.githubusercontent.com/Hero988/soc-compass-skill/master/soc-compass/SKILL.md?t=$(date +%s)" -o ~/.claude/skills/soc-compass/SKILL.md
 ```
 
 **PowerShell (Windows):**
 
 ```powershell
-New-Item -ItemType Directory -Force -Path "$HOME/.claude/skills/soc-compass" | Out-Null; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Hero988/soc-compass-skill/master/soc-compass/SKILL.md" -OutFile "$HOME/.claude/skills/soc-compass/SKILL.md"
+New-Item -ItemType Directory -Force -Path "$HOME/.claude/skills/soc-compass" | Out-Null; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Hero988/soc-compass-skill/master/soc-compass/SKILL.md?t=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" -OutFile "$HOME/.claude/skills/soc-compass/SKILL.md"
 ```
 
 The skill auto-loads in every Claude Code session. Verify with: "What skills are available?"
