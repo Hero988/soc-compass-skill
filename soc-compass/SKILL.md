@@ -101,26 +101,34 @@ curl -s "$API/workspaces/{workspaceId}" -H "Authorization: Bearer $KEY"
 ```
 Note the `siemProvider` (splunk/elastic/sentinel), `mode`, `contextInput`, and `dataSource`.
 
-**Step 2: Create or select conversation**
+**Step 2: ALWAYS submit alert to the queue first**
 
-If this alert is part of an already-investigated incident (same host, same attack chain, same timeframe), **append to the existing conversation** instead of creating a new one. Otherwise, create a new conversation:
+Every investigation MUST go through the queue — even if the user pasted the alert directly in the CLI. This ensures the Agent Dashboard on the frontend tracks all investigations in real-time.
 
 ```bash
-curl -s -X POST "$API/workspaces/{workspaceId}/conversations" \
+curl -s -X POST "$API/workspaces/{workspaceId}/queue" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"title": "Investigation: {alertTitle}", "eventId": "{alertId}"}'
+  -d '{"alertId": "{alertId}", "alertTitle": "{alertTitle}", "alertSeverity": "{severity}", "alertData": "{full alert text}"}'
 ```
+Save the returned `id` as `QID` (queue item ID).
 
-**Step 3: Check for cached context**
+**Step 3: Claim the alert**
 ```bash
-curl -s "$API/conversations/{CONV_ID}/context" -H "Authorization: Bearer $KEY"
+curl -s -X PATCH "$API/queue/{QID}/claim" -H "Authorization: Bearer $KEY"
 ```
-If `agentContext` has a `schema` field → you already have the schema, skip to Step 5.
-If `agentContext` is null → fresh investigation, proceed to Step 4.
+The frontend Agent Dashboard now shows this alert as "Processing".
 
-**Step 4: MANDATORY schema discovery**
+**Step 4: Check for cached context from prior investigations**
 
-This step is NON-NEGOTIABLE. You MUST do this before ANY investigation query.
+Check if the workspace already has a cached schema from a prior queue item:
+```bash
+curl -s "$API/workspaces/{workspaceId}/queue?status=completed" -H "Authorization: Bearer $KEY"
+```
+If a completed alert exists with the same workspace, its context (including schema) can be reused. Otherwise, proceed to schema discovery.
+
+**Step 5: MANDATORY schema discovery**
+
+This step is NON-NEGOTIABLE. You MUST do this before ANY investigation query. Post progress to the queue so the dashboard shows what you're doing:
 
 Ask the user directly based on the SIEM provider from Step 1:
 
@@ -153,7 +161,7 @@ curl -s -X POST "$API/conversations/{CONV_ID}/context" \
 ```
 3. **ALL subsequent queries MUST use names from the schema.** Never guess or use defaults.
 
-**Step 5: Investigation loop**
+**Step 6: Investigation loop**
 
 NOW you can formulate queries — using ONLY field names, indexes, and sourcetypes from the schema.
 
@@ -172,7 +180,7 @@ For each query:
 
 Analyze results. Apply the classification framework after 1-3 initial queries.
 
-**Step 6: Write verdict**
+**Step 7: Write verdict**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/verdict" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
@@ -181,12 +189,12 @@ curl -s -X POST "$API/conversations/{CONV_ID}/verdict" \
 
 Valid verdicts: `True Positive`, `False Positive`, `Suspicious`, `Requires Further Investigation`, `Unknown`
 
-**Step 7: Post report** (use Node.js serialization — see "Posting multi-line content" above)
+**Step 8: Post report** (use Node.js serialization — see "Posting multi-line content" above)
 
 Use the 9-section report format (see `references/report-format.md`):
 1. Executive Summary 2. Alert Details 3. Investigation Findings 4. Classification (verdict + rationale + H1/H2 evidence) 5. Critical Findings 6. IOCs (table) 7. Affected Entities 8. MITRE ATT&CK 9. Recommendations
 
-**Step 8: Save full context**
+**Step 9: Save full context**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/context" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
