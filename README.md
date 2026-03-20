@@ -1,45 +1,58 @@
 # SOC Compass Skill
 
-An [Agent Skill](https://agentskills.io) that enables AI agents (Claude Code, Cursor, Copilot, Codex, etc.) to conduct security investigations on the [SOC Compass](https://soccompass.com) platform.
+An [Agent Skill](https://agentskills.io) that enables AI agents to conduct security investigations on the [SOC Compass](https://soccompass.com) platform. The agent acts as the SOC analyst — reading workspace context, formulating SIEM queries, analyzing results, and writing verdicts.
 
 ## Installation
+
+### Claude Code
+
+**Git Bash / macOS / Linux:**
+
+```bash
+mkdir -p ~/.claude/skills/soc-compass && curl -sL https://raw.githubusercontent.com/Hero988/soc-compass-skill/master/soc-compass/SKILL.md -o ~/.claude/skills/soc-compass/SKILL.md
+```
+
+**PowerShell (Windows):**
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME/.claude/skills/soc-compass" | Out-Null; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Hero988/soc-compass-skill/master/soc-compass/SKILL.md" -OutFile "$HOME/.claude/skills/soc-compass/SKILL.md"
+```
+
+The skill auto-loads in every Claude Code session. Verify with: "What skills are available?"
+
+### Other agents (Cursor, Codex, Gemini CLI, Copilot, etc.)
 
 ```bash
 npx skills add Hero988/soc-compass-skill
 ```
 
-## What it does
+Installs via [skills.sh](https://skills.sh) — works with 30+ AI tools.
 
-The AI agent acts as a SOC analyst:
+## Setup
 
-1. Reads workspace context and SIEM configuration
-2. Formulates investigation queries (SPL, KQL, ESQL)
-3. Asks you to run queries in your SIEM and paste results
-4. Analyzes results and asks follow-up questions
-5. Writes a verdict and investigation report
-6. Saves investigation context for future reference
-
-## Requirements
-
-- A SOC Compass account with an API key (`soc_sk_...`)
-- Access to your SIEM (Splunk, Elastic, or Microsoft Sentinel)
-
-## Getting an API key
-
-1. Log in to SOC Compass
+1. Create an account at [soccompass.com](https://soccompass.com)
 2. Go to **Profile > API Keys**
-3. Click **Create API Key**
-4. Copy the key (shown only once)
+3. Click **Create API Key** and copy the key (shown only once)
+4. Provide the key to your AI agent when it asks (format: `soc_sk_...`)
 
 ## Usage
 
-Once installed, the skill auto-triggers when you mention SOC Compass, security investigations, or alert triage. You can also invoke it directly:
+The skill auto-triggers when you mention SOC Compass, security investigations, alert triage, or SIEM queries. Provide your API key inline when prompted.
 
-```
-/soc-compass
-```
+**Example prompts:**
 
-Example: "Investigate alert ALERT-2024-001 in workspace k7dj9x2m3abc"
+- "Investigate this alert in workspace `k7dj9x2m3abc`: [paste alert details]"
+- "Continue the investigation on conversation `j5n8x2p4q7abc`"
+- "What is the verdict for the phishing alert we investigated?"
+
+## What it does
+
+1. Reads workspace context and SIEM configuration (Splunk / Elastic / Sentinel)
+2. Asks for SIEM schema if not cached, then formulates investigation queries
+3. Asks you to run queries in your SIEM and paste results
+4. Analyzes results, checks IOCs, maps to MITRE ATT&CK
+5. Writes a verdict and 9-section investigation report
+6. Saves investigation context for seamless resume
 
 ## Supported modes
 
@@ -48,21 +61,12 @@ Example: "Investigate alert ALERT-2024-001 in workspace k7dj9x2m3abc"
 - **VM Forensics** — OSCAR-DFIR framework for disk/memory analysis
 - **Sigma Rules** — Detection rule engineering
 
-## Skill structure
+## API
 
-```
-soc-compass/
-  SKILL.md                          # Core skill instructions
-  assets/openapi.json               # API specification
-  references/
-    alert-triage-methodology.md     # Classification framework
-    vm-forensics-methodology.md     # OSCAR-DFIR guide
-    sigma-rule-methodology.md       # Sigma YAML reference
-    siem-query-guides.md            # SPL/KQL/ESQL examples
-    report-format.md                # 9-section report template
-    investigation-principles.md     # Core principles
-```
+- **Base URL:** `https://astute-cormorant-480.convex.site/api/v1`
+- **Auth:** `Authorization: Bearer soc_sk_<key>`
+- **Docs:** [API Reference](https://soccompass.com/docs/api)
 
-## Compatible with
+## License
 
-Works with 30+ AI tools including Claude Code, Cursor, GitHub Copilot, VS Code, OpenAI Codex, Gemini CLI, Windsurf, and more.
+MIT
