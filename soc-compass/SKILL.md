@@ -1,6 +1,6 @@
 ---
 name: soc-compass
-description: Conducts security investigations on SOC Compass. The AI agent reads workspace context, asks the user to run SIEM queries, analyzes results, and writes verdicts. Use when the user mentions SOC Compass, security investigations, alert triage, SIEM queries, threat analysis, Splunk, Elastic, Sentinel, IOC lookups, or investigation workspaces. Do not use for general cybersecurity questions not involving the SOC Compass platform.
+description: Conducts security investigations on SOC Compass. The AI agent reads workspace context, asks the user to run SIEM queries, analyzes results, and writes verdicts. Supports multiple alerts in parallel via subagent dispatch. Use when the user mentions SOC Compass, security investigations, alert triage, SIEM queries, threat analysis, Splunk, Elastic, Sentinel, IOC lookups, investigation workspaces, or multiple alerts. Do not use for general cybersecurity questions not involving the SOC Compass platform.
 ---
 
 # SOC Compass API
@@ -131,6 +131,8 @@ Ask the user directly based on the SIEM provider from Step 1:
 > ```
 > This will show me what indexes, sourcetypes, and fields exist so I can write accurate queries.
 
+Note: `earliest=-30d` limits to the last 30 days — good for production SIEMs to avoid scanning too much data. For TryHackMe labs or historical investigations where events may be older, the autonomous mode uses `earliest=0` (All time) instead.
+
 **Elastic:**
 > Please go to Kibana Discover, select the relevant index pattern, and paste **5-10 sample events** as JSON. I need the actual field names to write correct ES|QL queries.
 
@@ -222,13 +224,40 @@ If the new alert is clearly part of an already-investigated incident (same host,
 
 ## Multi-alert workflow
 
-When the user says "first alert" or implies multiple alerts:
+Alerts can arrive at any time — the user should NOT have to wait for one investigation to finish before sending the next. Handle this with **subagent dispatch**.
 
-1. Ask upfront: "How many alerts are there? Are they on the same host?"
-2. If same host/timeframe: plan to use a single conversation for related alerts
-3. Schema discovery only needs to happen ONCE per workspace
-4. For subsequent alerts on the same host, check if existing investigation already covers the activity before running new queries
-5. When an alert is simply a different view of already-investigated activity, classify it based on the evidence already gathered — no redundant queries needed
+### Subagent dispatch (recommended for multiple alerts)
+
+When the user sends a new alert while you're working on a previous one, or sends multiple alerts:
+
+1. Use the **Agent tool** to spawn a subagent for each alert investigation
+2. Pass the subagent: API key, workspace ID, SIEM URL (if autonomous), alert details, and cached schema (if available)
+3. The subagent independently handles the full investigation: schema discovery → queries → analysis → verdict → report → context save
+4. The main session stays immediately available for new alerts
+5. Run subagents **in the background** (`run_in_background: true`) so you can keep accepting new alerts
+
+**HITL mode:** Multiple subagents can run in parallel — each asks the user for query results independently.
+
+**Autonomous/Chrome mode:** Only one subagent can use Chrome at a time. Queue additional alerts and dispatch them when the current Chrome investigation completes.
+
+### Related alerts (same host/incident)
+
+If a new alert is clearly part of the same incident (same host, same timeframe, same attack chain):
+- Append to the existing conversation instead of creating a new one (Scenario E)
+- Skip schema discovery (already cached)
+- Reference prior findings — don't re-run queries for already-investigated activity
+- Schema discovery only needs to happen ONCE per workspace
+
+### Batch mode (alternative)
+
+User can also paste ALL alerts in a single message. Process each sequentially, reusing schema and conversation for related alerts (same host).
+
+### Completion signals
+
+After each alert investigation, clearly signal completion:
+> "Alert {ID} investigation complete. Verdict: {verdict}. Ready for the next alert."
+
+This helps the user know when it's safe to review results and when to send more alerts.
 
 ## Asking the user for information (HITL mode — default)
 
