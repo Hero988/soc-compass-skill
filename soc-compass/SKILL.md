@@ -222,42 +222,78 @@ If the new alert is clearly part of an already-investigated incident (same host,
 4. Post verdict and report as additional messages in the same conversation
 5. Only create a new conversation if the alert is on a different host or a genuinely separate incident
 
-## Multi-alert workflow
+## Alert queue workflow
 
-Alerts can arrive at any time — the user should NOT have to wait for one investigation to finish before sending the next. Handle this with **subagent dispatch**.
+Alerts are managed via a Convex-backed queue. Users submit alerts via the **frontend Agent Dashboard** or via the **API**. The AI processes them one at a time, checking the queue after each investigation.
 
-### Subagent dispatch (recommended for multiple alerts)
+### Starting an investigation session
 
-When the user sends a new alert while you're working on a previous one, or sends multiple alerts:
+1. **Check the queue for pending alerts:**
+```bash
+curl -s "$API/workspaces/{wsId}/queue?status=pending" -H "Authorization: Bearer $KEY"
+```
 
-1. Use the **Agent tool** to spawn a subagent for each alert investigation
-2. Pass the subagent: API key, workspace ID, SIEM URL (if autonomous), alert details, and cached schema (if available)
-3. The subagent independently handles the full investigation: schema discovery → queries → analysis → verdict → report → context save
-4. The main session stays immediately available for new alerts
-5. Run subagents **in the background** (`run_in_background: true`) so you can keep accepting new alerts
+2. **If pending alerts exist, claim the next one:**
+```bash
+curl -s -X PATCH "$API/queue/{queueItemId}/claim" \
+  -H "Authorization: Bearer $KEY"
+```
+This marks it as "processing" — the frontend Agent Dashboard shows it instantly.
 
-**HITL mode:** Multiple subagents can run in parallel — each asks the user for query results independently.
+3. **Create a conversation and investigate** (follow the standard investigation flow: schema discovery → queries → analysis → classification)
 
-**Autonomous/Chrome mode:** Only one subagent can use Chrome at a time. Queue additional alerts and dispatch them when the current Chrome investigation completes.
+4. **Write verdict:**
+```bash
+curl -s -X POST "$API/conversations/{convId}/verdict" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"eventId": "{alertId}", "verdict": "True Positive", "confidence": 92, "severity": "high", "escalationRequired": true, "classificationRationale": "..."}'
+```
 
-### Related alerts (same host/incident)
+5. **Post report** (use the heredoc + Node.js file-based method for Windows)
 
-If a new alert is clearly part of the same incident (same host, same timeframe, same attack chain):
-- Append to the existing conversation instead of creating a new one (Scenario E)
-- Skip schema discovery (already cached)
-- Reference prior findings — don't re-run queries for already-investigated activity
+6. **Mark queue item complete:**
+```bash
+curl -s -X PATCH "$API/queue/{queueItemId}/complete" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"verdict": "True Positive", "verdictConfidence": 92, "conversationId": "{convId}"}'
+```
+The frontend shows the alert as completed with the verdict.
+
+7. **Check for more pending alerts:**
+```bash
+curl -s "$API/workspaces/{wsId}/queue/next" -H "Authorization: Bearer $KEY"
+```
+If `empty: true` → "All alerts processed. Queue is empty."
+If an alert exists → go to step 2.
+
+### Users can submit alerts anytime
+
+Users add alerts to the queue via:
+- **Frontend:** Workspace → Agent Dashboard → Submit Alert button
+- **API:**
+```bash
+curl -s -X POST "$API/workspaces/{wsId}/queue" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"alertId": "1024", "alertTitle": "Scheduled Task", "alertSeverity": "medium", "alertData": "...full alert text..."}'
+```
+
+The AI picks them up after completing the current investigation. Users don't need to wait.
+
+### Linked / related alerts (same host or incident)
+
+When a new alert is on the same host, same timeframe, or same attack chain:
+- **Append to the existing conversation** (Scenario E) — don't create a new one
+- **Skip schema discovery** — already cached in context
+- **Check prior findings first** — classify immediately if activity was already investigated
+- **Cross-reference evidence** — IOCs, processes, and timelines from prior alerts
 - Schema discovery only needs to happen ONCE per workspace
-
-### Batch mode (alternative)
-
-User can also paste ALL alerts in a single message. Process each sequentially, reusing schema and conversation for related alerts (same host).
 
 ### Completion signals
 
-After each alert investigation, clearly signal completion:
+After each alert investigation, clearly signal:
 > "Alert {ID} investigation complete. Verdict: {verdict}. Ready for the next alert."
 
-This helps the user know when it's safe to review results and when to send more alerts.
+Then immediately check the queue for more pending alerts.
 
 ## Asking the user for information (HITL mode — default)
 
@@ -470,6 +506,13 @@ Full guide: `references/siem-query-guides.md`
 | `GET` | `/conversations/:id/verdict` | Read verdicts |
 | `POST` | `/conversations/:id/verdict` | Write verdict (upserts by eventId) |
 | `GET` | `/conversations/:id/status` | Processing status |
+| `POST` | `/workspaces/:wsId/queue` | Add alert to queue |
+| `GET` | `/workspaces/:wsId/queue` | List queue (?status=pending/completed/all) |
+| `GET` | `/workspaces/:wsId/queue/next` | Get next pending alert |
+| `PATCH` | `/queue/:id/claim` | Mark alert as processing |
+| `PATCH` | `/queue/:id/complete` | Mark alert as completed (with verdict) |
+| `PATCH` | `/queue/:id/fail` | Mark alert as failed |
+| `DELETE` | `/queue/:id` | Remove from queue |
 
 All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 
