@@ -21,19 +21,33 @@ Key format: `soc_sk_<32hex>`. The user provides this when invoking the skill.
 
 ### Posting multi-line content (Windows compatibility)
 
-When posting reports or multi-line content, ALWAYS serialize via Node.js to avoid JSON escaping failures:
+Reports contain Windows paths like `C:\Users\luke.s\AppData\...` where `\T`, `\0`, etc. break Node.js template literals. Use this **two-step file-based method** instead:
 
 ```bash
+# Step 1: Write report to file using heredoc (handles all escaping including backslashes)
+cat > "$TEMP/report.txt" << 'ENDOFREPORT'
+Your report with C:\paths\and\backslashes goes here...
+ENDOFREPORT
+
+# Step 2: Read file and JSON-stringify with Node.js (use cygpath for Windows paths)
+REPORT_PATH="$(cygpath -w "$TEMP/report.txt")"
+PAYLOAD_PATH="$(cygpath -w "$TEMP/payload.json")"
 node -e "
-const content = \`Your multi-line report here...\`;
-process.stdout.write(JSON.stringify({role: 'assistant', content}));
-" > /tmp/payload.json
+const fs = require('fs');
+const content = fs.readFileSync(process.argv[1], 'utf8');
+fs.writeFileSync(process.argv[2], JSON.stringify({role: 'assistant', content}));
+" "$REPORT_PATH" "$PAYLOAD_PATH"
+
+# Step 3: Post using the JSON file
 curl -s -X POST "$API/conversations/$CONV/messages" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d @/tmp/payload.json
+  -d @"$PAYLOAD_PATH"
 ```
 
-**NEVER** attempt to inline multi-line markdown directly in `curl -d '...'` on Windows. Backslashes, quotes, and newlines will break.
+**CRITICAL Windows notes:**
+- **NEVER** use Node.js template literals (backticks) for content with Windows paths — `\0` triggers "Legacy octal escape" errors
+- **NEVER** use `/tmp/` paths with Node.js on Windows — Node.js resolves `/tmp/` as `C:\tmp\` which doesn't exist. Always use `$TEMP` with `cygpath -w` to convert to Windows paths
+- The heredoc with `'ENDOFREPORT'` (single-quoted delimiter) prevents ALL bash escaping — safe for any content
 
 ## CRITICAL: Schema discovery is MANDATORY
 
@@ -270,45 +284,66 @@ Use the browser tools provided by the `claude-in-chrome` MCP to interact with we
 
 ### Autonomous investigation flow
 
-Follow the same investigation steps as HITL mode, but instead of asking the user to run queries, run them yourself via Chrome:
+Follow the same investigation steps as HITL mode, but instead of asking the user to run queries, run them yourself via Chrome.
+
+**Reading results:** Use `get_page_text` instead of screenshots for extracting complete data (hashes, encoded commands, long field values). Screenshots are useful for visual verification but lose critical details like full SHA256 hashes and base64 strings. For Splunk, click into the Events tab and use `get_page_text` to read full event details.
 
 **Schema discovery (Splunk):**
-1. Navigate to the Splunk URL provided by the user
-2. Find and click the "Search & Reporting" app
-3. Clear any existing query in the search bar
-4. Type the schema discovery query: `index=* NOT index=_* earliest=-30d | head 10000 | fieldsummary maxvals=10 | sort -count | head 60`
-5. Click the search button (or press Enter)
-6. Wait for results to load
-7. Read the results table
-8. Save schema to SOC Compass context via API
+
+Use URL-based navigation (most reliable — avoids CodeMirror editor interaction issues):
+
+1. Navigate directly to: `{splunk_url}/en-US/app/search/search?earliest=0&latest=&q=search%20index%3D*%20NOT%20index%3D_*%20%7C%20head%2010000%20%7C%20fieldsummary%20maxvals%3D10%20%7C%20sort%20-count%20%7C%20head%2060&display.page.search.tab=statistics`
+2. Wait for results to load
+3. Use `get_page_text` to read the results table
+4. Save schema to SOC Compass context via API
+
+Note: `earliest=0&latest=` sets the time range to "All time" — essential for historical data (TryHackMe labs, past incidents). The default "Last 24 hours" will return nothing for historical events.
 
 **Schema discovery (Kibana/Elastic):**
-1. Navigate to the Kibana URL
-2. Go to Discover
-3. Select the relevant index pattern
-4. Read 5-10 sample events to understand the field structure
+1. Navigate to the Kibana URL → Discover
+2. Select the relevant index pattern
+3. Set time range to cover the investigation period
+4. Use `get_page_text` to read 5-10 sample events
 5. Save schema to context
 
 **Schema discovery (Sentinel):**
 1. Navigate to the Azure Portal Log Analytics workspace
 2. Run: `search * | summarize count() by $table | sort by count_ desc | take 20`
-3. Read results, then query sample events from the relevant table
+3. Use `get_page_text` to read results, then query sample events from the relevant table
 4. Save schema to context
 
-**Running investigation queries:**
-1. Navigate to the SIEM search page (if not already there)
-2. Clear the previous query
-3. Type the new SPL/KQL/ESQL query
-4. Execute the search
-5. Read the results
-6. Analyze and decide next steps
-7. Repeat as needed
+**Running investigation queries (Splunk — URL method, recommended):**
+
+Navigate directly with the query in the URL instead of typing in the search bar:
+
+```
+{splunk_url}/en-US/app/search/search?earliest=0&latest=&q=search%20{url_encoded_query}&display.page.search.tab=events
+```
+
+Steps:
+1. URL-encode your SPL query
+2. Navigate to the URL above with the encoded query
+3. Wait for results to load
+4. Use `get_page_text` to read the full results (Events tab for raw events, Statistics tab for table output)
+5. Analyze and formulate next query
+6. Repeat
+
+**Why URL-based is better than typing in the search bar:**
+- Splunk's CodeMirror editor often fails with `form_input` — text appends instead of replacing
+- Ctrl+A sometimes selects the whole page instead of just the query
+- URL-based execution is 100% reliable and also sets the time range correctly
+
+**Running investigation queries (Kibana/Sentinel):**
+1. Navigate to the query interface
+2. Clear and type the new query
+3. Execute and use `get_page_text` to read results
+4. Analyze and repeat
 
 **IOC lookups via Chrome:**
 1. Open a new tab
 2. Navigate to VirusTotal (https://www.virustotal.com), ThreatFox, or other threat intel site
 3. Search for the hash/IP/domain
-4. Read the results and detection ratios
+4. Use `get_page_text` to read the results and detection ratios
 5. Include findings in the investigation
 
 **Handling errors:**
@@ -316,6 +351,7 @@ Follow the same investigation steps as HITL mode, but instead of asking the user
 - If a **CAPTCHA** appears: pause and ask the user to solve it, then continue
 - If the **page doesn't load** or times out: try refreshing, then ask the user for help
 - If **results are still loading**: wait and check again (SIEM queries can take time)
+- If **CodeMirror/search bar interaction fails**: fall back to URL-based query execution
 
 ### Important: Still use the SOC Compass API
 
