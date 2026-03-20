@@ -5,7 +5,7 @@ description: Conducts security investigations on SOC Compass. The AI agent reads
 
 # SOC Compass API
 
-Provides programmatic access to SOC Compass — a security investigation platform. The agent acts as the SOC analyst: reading workspace context, formulating SIEM queries, asking the user to execute them, analyzing results, and writing verdicts.
+The agent acts as the SOC analyst: reading workspace context, formulating SIEM queries, asking the user to execute them, analyzing results, and writing verdicts to the SOC Compass platform.
 
 ## How to call the API
 
@@ -14,23 +14,66 @@ Provides programmatic access to SOC Compass — a security investigation platfor
 ```bash
 API="https://astute-cormorant-480.convex.site/api/v1"
 KEY="<user-provided-api-key>"
-
 curl -s "$API/ENDPOINT" -H "Authorization: Bearer $KEY"
 ```
 
-The user provides their API key (format: `soc_sk_<32hex>`) when invoking this skill.
+Key format: `soc_sk_<32hex>`. The user provides this when invoking the skill.
+
+### Posting multi-line content (Windows compatibility)
+
+When posting reports or multi-line content, ALWAYS serialize via Node.js to avoid JSON escaping failures:
+
+```bash
+node -e "
+const content = \`Your multi-line report here...\`;
+process.stdout.write(JSON.stringify({role: 'assistant', content}));
+" > /tmp/payload.json
+curl -s -X POST "$API/conversations/$CONV/messages" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d @/tmp/payload.json
+```
+
+**NEVER** attempt to inline multi-line markdown directly in `curl -d '...'` on Windows. Backslashes, quotes, and newlines will break.
 
 ## CRITICAL: Schema discovery is MANDATORY
 
-**You MUST discover the SIEM schema BEFORE writing ANY investigation query.** Do NOT guess index names, sourcetypes, or field names. Every SIEM instance has different indexes, sourcetypes, and field names. If you skip this step, your queries WILL fail.
+**You MUST discover the SIEM schema BEFORE writing ANY investigation query.** Do NOT guess index names, sourcetypes, or field names. Every SIEM instance is different. If you skip this step, your queries WILL fail.
 
 The schema tells you:
 - What **indexes** exist (e.g., `corp`, `main`, `wineventlog`)
-- What **sourcetypes** exist (e.g., `WinEventLog`, `WinEventLog:Security`, `xmlwineventlog`)
-- What **fields** are available and their exact names (e.g., `EventCode` vs `event.code` vs `EventID`)
+- What **sourcetypes** exist (e.g., `WinEventLog`, `_json`, `xmlwineventlog`)
+- What **fields** are available and their exact names (e.g., `EventCode` vs `event.code`)
 - How many events each field/index contains
 
 **Without the schema, you are blind. ALWAYS get the schema first.**
+
+Schema is **per-workspace** (same SIEM instance). If you already have it from a prior conversation in the same workspace, you do NOT need to re-ask. Save it to context on first discovery.
+
+## Analytical integrity
+
+**When you reach a classification based on evidence, DEFEND IT.** If the user questions your verdict:
+
+1. Restate the specific evidence supporting your classification
+2. Ask what counter-evidence they have that you may have missed
+3. Only change your classification if NEW evidence is presented
+4. Never change a verdict just because the user disagrees — agreement without evidence is worse than being wrong with reasoning
+
+A SOC analyst who flips their verdict without new evidence is unreliable. The user may be testing your conviction or playing devil's advocate.
+
+## Classification decision framework
+
+Classify based on the **SPECIFIC activity the alert detected**, not the overall host state:
+
+- Alert fires on Event X → Is Event X **itself** malicious/suspicious?
+  - YES → **True Positive**
+  - NO → **False Positive** (even if other malicious activity exists on the host)
+
+Example: Alert fires on a legitimate scheduled task creation. During investigation you discover a DIFFERENT malicious task on the same host.
+- The alert = **False Positive** (it detected a legitimate task)
+- The malware = **separate finding requiring its own alert/escalation**
+- Note both findings in the report, but classify the alert based on what IT detected
+
+This is NOT "the alert was useless" — the alert LED to discovering the malware. But classification is about the specific detected activity.
 
 ## Automated scenarios
 
@@ -44,20 +87,22 @@ curl -s "$API/workspaces/{workspaceId}" -H "Authorization: Bearer $KEY"
 ```
 Note the `siemProvider` (splunk/elastic/sentinel), `mode`, `contextInput`, and `dataSource`.
 
-**Step 2: Create conversation**
+**Step 2: Create or select conversation**
+
+If this alert is part of an already-investigated incident (same host, same attack chain, same timeframe), **append to the existing conversation** instead of creating a new one. Otherwise, create a new conversation:
+
 ```bash
 curl -s -X POST "$API/workspaces/{workspaceId}/conversations" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"title": "Investigation: {alertTitle}", "eventId": "{alertId}"}'
 ```
-Save the returned `id` as `CONV_ID`.
 
 **Step 3: Check for cached context**
 ```bash
 curl -s "$API/conversations/{CONV_ID}/context" -H "Authorization: Bearer $KEY"
 ```
 If `agentContext` has a `schema` field → you already have the schema, skip to Step 5.
-If `agentContext` is null → this is a fresh investigation, proceed to Step 4.
+If `agentContext` is null → fresh investigation, proceed to Step 4.
 
 **Step 4: MANDATORY schema discovery**
 
@@ -70,95 +115,64 @@ Ask the user directly based on the SIEM provider from Step 1:
 > ```
 > index=* NOT index=_* earliest=-30d | head 10000 | fieldsummary maxvals=10 | sort -count | head 60
 > ```
-> This will show me what indexes, sourcetypes, and fields exist in your environment so I can write accurate queries.
+> This will show me what indexes, sourcetypes, and fields exist so I can write accurate queries.
 
 **Elastic:**
-> Please go to Kibana Discover, select the relevant index pattern, and paste **5-10 sample events** as JSON. I need to see the actual field names and structure to write correct ES|QL queries.
+> Please go to Kibana Discover, select the relevant index pattern, and paste **5-10 sample events** as JSON. I need the actual field names to write correct ES|QL queries.
 
 **Sentinel:**
 > Please run this in Azure Monitor Logs and paste the results:
 > ```
 > search * | summarize count() by $table | sort by count_ desc | take 20
 > ```
-> Then paste **3-5 sample events** from the most relevant table. I need to see the actual field names.
+> Then paste **3-5 sample events** from the most relevant table.
 
-After the user provides the schema results:
-
-1. **Parse the schema carefully** — extract index names, sourcetypes, field names, and event counts
-2. **Save it immediately to context** so you never need to ask again:
+After the user provides schema results:
+1. **Parse carefully** — extract index names, sourcetypes, field names, event counts
+2. **Save immediately** to context so you never need to ask again:
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/context" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{
-    "schema": {
-      "provider": "splunk",
-      "indexes": ["corp", "main"],
-      "sourcetypes": ["WinEventLog", "WinEventLog:Security"],
-      "fields": ["EventCode", "ComputerName", "Account_Name", "..."],
-      "rawSchemaOutput": "...the full output from the user..."
-    },
-    "investigationPhase": "schema_complete"
-  }'
+  -d '{"schema": {"provider": "splunk", "indexes": [...], "sourcetypes": [...], "fields": [...], "rawSchemaOutput": "..."}, "investigationPhase": "schema_complete"}'
 ```
-
-3. **ALL subsequent queries MUST use field names, index names, and sourcetypes from the schema.** Never guess or use defaults.
+3. **ALL subsequent queries MUST use names from the schema.** Never guess or use defaults.
 
 **Step 5: Investigation loop**
 
-NOW you can formulate queries — using ONLY the field names, indexes, and sourcetypes from the schema.
+NOW you can formulate queries — using ONLY field names, indexes, and sourcetypes from the schema.
 
 For each query:
-1. Check the schema to confirm the fields you need exist
-2. Use the correct index name from the schema (NOT `index=main` unless the schema shows `main`)
-3. Use the correct sourcetype from the schema
-4. Ask the user to run it and paste results:
+1. Verify the fields exist in the schema
+2. Use the correct index and sourcetype from the schema
+3. Ask the user to run it:
 
 > Please run this {SPL/KQL/ESQL} query and paste the results:
 > ```
 > {query using schema-verified field names}
 > ```
-> **Purpose:** {why this query matters for the investigation}
+> **Purpose:** {why this query matters}
 
-Analyze results after each query. Apply the classification framework (see `references/alert-triage-methodology.md`) after 1-3 initial queries.
+Analyze results. Apply the classification framework after 1-3 initial queries.
 
 **Step 6: Write verdict**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/verdict" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{
-    "eventId": "{alertId}",
-    "verdict": "True Positive",
-    "confidence": 92,
-    "severity": "high",
-    "escalationRequired": true,
-    "classificationRationale": "Multiple indicators confirm..."
-  }'
+  -d '{"eventId": "{alertId}", "verdict": "True Positive", "confidence": 92, "severity": "high", "escalationRequired": true, "classificationRationale": "..."}'
 ```
 
 Valid verdicts: `True Positive`, `False Positive`, `Suspicious`, `Requires Further Investigation`, `Unknown`
 
-**Step 7: Post report**
-```bash
-curl -s -X POST "$API/conversations/{CONV_ID}/messages" \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"role": "assistant", "content": "{FULL_9_SECTION_REPORT}"}'
-```
+**Step 7: Post report** (use Node.js serialization — see "Posting multi-line content" above)
 
-Use the 9-section report format from `references/report-format.md`.
+Use the 9-section report format (see `references/report-format.md`):
+1. Executive Summary 2. Alert Details 3. Investigation Findings 4. Classification (verdict + rationale + H1/H2 evidence) 5. Critical Findings 6. IOCs (table) 7. Affected Entities 8. MITRE ATT&CK 9. Recommendations
 
 **Step 8: Save full context**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/context" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{
-    "schema": {"...saved from Step 4..."},
-    "queriesRun": [{"query": "...", "purpose": "...", "resultSummary": "..."}],
-    "iocs": [{"value": "...", "type": "ip", "verdict": "malicious"}],
-    "mitreTechniques": [{"id": "T1566.001", "name": "...", "evidence": "..."}],
-    "keyFindings": ["..."],
-    "verdict": {"verdict": "...", "confidence": 92},
-    "investigationPhase": "completed"
-  }'
+  -d '{"schema": {...}, "queriesRun": [...], "iocs": [...], "mitreTechniques": [...], "keyFindings": [...], "verdict": {...}, "investigationPhase": "completed"}'
 ```
 
 ### Scenario B: Resume investigation
@@ -167,7 +181,7 @@ User references a conversation ID:
 ```bash
 curl -s "$API/conversations/{CONV_ID}/context" -H "Authorization: Bearer $KEY"
 ```
-Read the saved context — it already has the schema, queries run, findings, etc. Resume from where you left off. No need to re-read messages or redo schema discovery.
+Read saved context (schema, queries, findings). Resume from where you left off. No need to re-read messages or redo schema discovery.
 
 ### Scenario C: General question
 
@@ -179,6 +193,26 @@ User asks a question (not a full investigation):
 ### Scenario D: Extra context
 
 User provides info beyond what's in the workspace. Save it alongside investigation state in context.
+
+### Scenario E: Related alert (same host/incident)
+
+If the new alert is clearly part of an already-investigated incident (same host, same timeframe, same attack chain):
+
+1. **DO NOT create a new conversation** — append to the existing one
+2. Skip schema discovery (already cached in context)
+3. Reference prior findings: "This was already identified during Alert {X} investigation"
+4. Post verdict and report as additional messages in the same conversation
+5. Only create a new conversation if the alert is on a different host or a genuinely separate incident
+
+## Multi-alert workflow
+
+When the user says "first alert" or implies multiple alerts:
+
+1. Ask upfront: "How many alerts are there? Are they on the same host?"
+2. If same host/timeframe: plan to use a single conversation for related alerts
+3. Schema discovery only needs to happen ONCE per workspace
+4. For subsequent alerts on the same host, check if existing investigation already covers the activity before running new queries
+5. When an alert is simply a different view of already-investigated activity, classify it based on the evidence already gathered — no redundant queries needed
 
 ## Asking the user for information
 
@@ -195,15 +229,25 @@ Guidelines:
 - If user can't run a query, adapt your approach
 - Save context after each major step (enables resume)
 
+## Decoding encoded commands
+
+When you find PowerShell `-EncodedCommand` or other Base64 payloads, decode immediately:
+
+```bash
+echo '<base64_string>' | base64 -d | iconv -f UTF-16LE -t UTF-8
+```
+
+Always decode and present the decoded content to the user. Encoded commands are critical evidence.
+
 ## Investigation modes
 
 Auto-detected from the workspace `mode` field:
 
 **Alert Triage** (`ultimate_trigger`, default):
-Dual-hypothesis analysis — evaluate both benign and malicious explanations. See `references/alert-triage-methodology.md`. Apply classification framework after 1-3 queries.
+Dual-hypothesis analysis — evaluate both benign and malicious explanations. Apply classification framework after 1-3 queries. See `references/alert-triage-methodology.md`.
 
 **SOC Investigation** (`soc_investigation_trigger`):
-Broader scope, SIEM optional, evidence-first approach. More flexible than triage.
+Broader scope, SIEM optional, evidence-first approach.
 
 **VM Forensics** (`vm_forensics_trigger`):
 OSCAR-DFIR framework. Ask user to run ONE command at a time on the VM. See `references/vm-forensics-methodology.md`.
@@ -235,7 +279,6 @@ If the question doesn't match any mode, answer directly using workspace context.
 - Use `==` for equality, `has` for word match, `contains` for substring
 - Time: `| where TimeGenerated > ago(24h)`
 - End with `| take 20`
-- Field names from schema
 
 Full guide: `references/siem-query-guides.md`
 
@@ -254,26 +297,26 @@ Full guide: `references/siem-query-guides.md`
 | `GET` | `/workspaces/:wsId/conversations` | List conversations |
 | `POST` | `/workspaces/:wsId/conversations` | Create conversation |
 | `GET` | `/conversations/:id` | Conversation details |
-| `GET` | `/conversations/:id/messages` | Message history |
+| `GET` | `/conversations/:id/messages?limit=N` | Message history (max 100) |
 | `POST` | `/conversations/:id/messages` | Post message (user/assistant) |
+| `PUT` | `/conversations/:id/messages/:msgId` | Edit message content |
+| `DELETE` | `/conversations/:id/messages/:msgId` | Delete message |
 | `GET` | `/conversations/:id/context` | Get agent context |
-| `POST` | `/conversations/:id/context` | Save agent context |
+| `POST` | `/conversations/:id/context` | Save agent context (overwrite) |
 | `PATCH` | `/conversations/:id/context` | Merge-update context |
 | `GET` | `/conversations/:id/verdict` | Read verdicts |
-| `POST` | `/conversations/:id/verdict` | Write verdict |
+| `POST` | `/conversations/:id/verdict` | Write verdict (upserts by eventId) |
 | `GET` | `/conversations/:id/status` | Processing status |
 
 All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 
-## Error codes
+**Verdict POST behavior:** If a verdict already exists for the same eventId in the conversation, it will be updated (upsert). You can safely re-post a verdict to correct it.
 
-```json
-{ "error": { "code": "...", "message": "...", "status": 400 } }
-```
+## Error codes
 
 | Code | Status | Meaning |
 |------|--------|---------|
-| `bad_request` | 400 | Invalid input |
+| `bad_request` | 400 | Invalid input (check JSON syntax) |
 | `unauthorized` | 401 | Invalid/expired API key |
 | `not_found` | 404 | Resource not found |
 | `rate_limited` | 429 | Too many requests (60/min standard) |
@@ -281,14 +324,16 @@ All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 
 ## Critical rules
 
-1. **SCHEMA FIRST — NO EXCEPTIONS** — you MUST discover the SIEM schema before writing any investigation query. Never guess index names, sourcetypes, or field names. If you don't have the schema, ask for it.
-2. **Use schema-verified names ONLY** — every index, sourcetype, and field in your queries must come from the schema discovery results. If a field doesn't exist in the schema, don't use it.
-3. **Save schema to context immediately** — after schema discovery, save it so you never need to ask again for this conversation.
-4. **Context is AUTHORITATIVE** — never contradict user-provided workspace context without concrete evidence
-5. **Temporal investigation is MANDATORY** — always check what happened AFTER the alert event
-6. **Classify EARLY** — after 1-3 initial queries, apply the classification framework
-7. **Save context after each major step** — this enables resuming if the session is interrupted
-8. **Post the final report as an assistant message** so it appears in the frontend conversation
-9. **Never fabricate query results** — only use data the user has provided
-10. **Follow the 9-section report format** from `references/report-format.md`
-11. **TP does not equal confirmed malware** — True Positive means the alert correctly identified suspicious activity requiring response
+1. **SCHEMA FIRST — NO EXCEPTIONS** — discover the SIEM schema before ANY investigation query. Never guess index names, sourcetypes, or field names.
+2. **Use schema-verified names ONLY** — every index, sourcetype, and field must come from schema discovery.
+3. **Save schema to context immediately** — so you never need to ask again for this workspace.
+4. **DEFEND your classifications** — only change a verdict when NEW evidence is presented, not because the user disagrees. Restate your evidence and ask for counter-evidence.
+5. **Classify the SPECIFIC activity** — an alert that fires on legitimate activity is FP even if unrelated malicious activity exists on the same host. Report both, classify separately.
+6. **Reuse conversations for same-incident alerts** — don't mechanically create new conversations for every alert.
+7. **Temporal investigation is MANDATORY** — always check what happened AFTER the alert event.
+8. **Classify EARLY** — after 1-3 initial queries, apply the classification framework.
+9. **Save context after each major step** — enables resume if the session is interrupted.
+10. **Post the final report as an assistant message** so it appears in the frontend.
+11. **Use Node.js for JSON serialization** on Windows — never inline multi-line content in curl -d.
+12. **Never fabricate query results** — only use data the user has provided.
+13. **TP does not equal confirmed malware** — True Positive means the alert correctly identified suspicious activity requiring response.

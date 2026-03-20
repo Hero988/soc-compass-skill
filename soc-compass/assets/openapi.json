@@ -233,6 +233,42 @@
         "responses": { "201": { "description": "Message posted" } }
       }
     },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "put": {
+        "summary": "Edit message",
+        "description": "Update the content of an existing message.",
+        "tags": ["Messages"],
+        "parameters": [
+          { "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["content"],
+                "properties": {
+                  "content": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Message edited" } }
+      },
+      "delete": {
+        "summary": "Delete message",
+        "description": "Soft-delete a message (sets content to [deleted]).",
+        "tags": ["Messages"],
+        "parameters": [
+          { "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "messageId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Message deleted" } }
+      }
+    },
     "/conversations/{conversationId}/context": {
       "get": {
         "summary": "Get agent context",
