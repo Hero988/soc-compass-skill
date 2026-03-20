@@ -153,13 +153,19 @@ Note: `earliest=-30d` limits to the last 30 days — good for production SIEMs t
 
 After the user provides schema results:
 1. **Parse carefully** — extract index names, sourcetypes, field names, event counts
-2. **Save immediately** to context so you never need to ask again:
+2. **Save immediately** to the queue item context:
 ```bash
-curl -s -X POST "$API/conversations/{CONV_ID}/context" \
+curl -s -X PATCH "$API/queue/{QID}/context" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"schema": {"provider": "splunk", "indexes": [...], "sourcetypes": [...], "fields": [...], "rawSchemaOutput": "..."}, "investigationPhase": "schema_complete"}'
 ```
-3. **ALL subsequent queries MUST use names from the schema.** Never guess or use defaults.
+3. **Post progress** so the dashboard shows schema discovery is done:
+```bash
+curl -s -X PATCH "$API/queue/{QID}/progress" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"step": "schema_discovery", "status": "complete", "title": "Schema discovery complete", "detail": "Found index=main, sourcetype=_json, 595 events"}'
+```
+4. **ALL subsequent queries MUST use names from the schema.** Never guess or use defaults.
 
 **Step 6: Investigation loop**
 
@@ -180,26 +186,42 @@ For each query:
 
 Analyze results. Apply the classification framework after 1-3 initial queries.
 
-**Step 7: Write verdict**
+**Step 7: Save IOCs and MITRE techniques to the queue item**
 ```bash
-curl -s -X POST "$API/conversations/{CONV_ID}/verdict" \
+curl -s -X PATCH "$API/queue/{QID}/iocs" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"eventId": "{alertId}", "verdict": "True Positive", "confidence": 92, "severity": "high", "escalationRequired": true, "classificationRationale": "..."}'
+  -d '{"iocs": [{"value": "...", "type": "ip", "verdict": "malicious", "context": "C2 server"}], "append": true}'
+
+curl -s -X PATCH "$API/queue/{QID}/mitre" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"techniques": [{"techniqueId": "T1053.005", "name": "Scheduled Task", "tactic": "Persistence"}], "append": true}'
+```
+
+**Step 8: Save report to the queue item** (use heredoc + Node.js for Windows paths — see "Posting multi-line content" above)
+
+Write the 9-section report (see `references/report-format.md`), then:
+```bash
+curl -s -X PATCH "$API/queue/{QID}/report" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d @"$PAYLOAD_PATH"
+```
+Where payload JSON is `{"report": "# Investigation Report..."}`.
+
+**Step 9: Mark complete with verdict**
+```bash
+curl -s -X PATCH "$API/queue/{QID}/complete" \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"verdict": "True Positive", "verdictConfidence": 92, "escalationRequired": true, "classificationRationale": "...", "queriesExecuted": 5, "agentSource": "claude-code"}'
 ```
 
 Valid verdicts: `True Positive`, `False Positive`, `Suspicious`, `Requires Further Investigation`, `Unknown`
 
-**Step 8: Post report** (use Node.js serialization — see "Posting multi-line content" above)
-
-Use the 9-section report format (see `references/report-format.md`):
-1. Executive Summary 2. Alert Details 3. Investigation Findings 4. Classification (verdict + rationale + H1/H2 evidence) 5. Critical Findings 6. IOCs (table) 7. Affected Entities 8. MITRE ATT&CK 9. Recommendations
-
-**Step 9: Save full context**
+**Step 10: Check queue for more alerts**
 ```bash
-curl -s -X POST "$API/conversations/{CONV_ID}/context" \
-  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"schema": {...}, "queriesRun": [...], "iocs": [...], "mitreTechniques": [...], "keyFindings": [...], "verdict": {...}, "investigationPhase": "completed"}'
+curl -s "$API/workspaces/{workspaceId}/queue/next" -H "Authorization: Bearer $KEY"
 ```
+If `empty: true` → "All alerts processed."
+If an alert exists → go to Step 3 (claim it).
 
 ### Scenario B: Resume investigation
 
@@ -481,15 +503,17 @@ Steps:
 - If **results are still loading**: wait and check again (SIEM queries can take time)
 - If **CodeMirror/search bar interaction fails**: fall back to URL-based query execution
 
-### Important: Still use the SOC Compass API
+### Important: Still use the SOC Compass queue API
 
 Even in autonomous mode, you MUST still:
-- Save schema to conversation context via API
-- Write the verdict via API
-- Post the report as a message via API
-- Save full investigation context via API
+- Submit to queue + claim (Steps 2-3) so the dashboard tracks the investigation
+- Post progress steps via `PATCH /queue/:id/progress` as you work
+- Save IOCs via `PATCH /queue/:id/iocs`
+- Save MITRE via `PATCH /queue/:id/mitre`
+- Save report via `PATCH /queue/:id/report`
+- Mark complete via `PATCH /queue/:id/complete` with verdict
 
-Chrome is used to GATHER evidence. The API is used to PERSIST results.
+Chrome is used to GATHER evidence. The queue API is used to PERSIST results and update the dashboard.
 
 ## Decoding encoded commands
 
@@ -605,11 +629,11 @@ All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 3. **Save schema to context immediately** — so you never need to ask again for this workspace.
 4. **DEFEND your classifications** — only change a verdict when NEW evidence is presented, not because the user disagrees. Restate your evidence and ask for counter-evidence.
 5. **Classify the SPECIFIC activity** — an alert that fires on legitimate activity is FP even if unrelated malicious activity exists on the same host. Report both, classify separately.
-6. **Reuse conversations for same-incident alerts** — don't mechanically create new conversations for every alert.
+6. **ALWAYS submit to queue first** — even when the user pastes an alert directly in the CLI. This ensures the Agent Dashboard tracks every investigation.
 7. **Temporal investigation is MANDATORY** — always check what happened AFTER the alert event.
 8. **Classify EARLY** — after 1-3 initial queries, apply the classification framework.
 9. **Save context after each major step** — enables resume if the session is interrupted.
-10. **Post the final report as an assistant message** so it appears in the frontend.
+10. **Save the report to the queue item** via `PATCH /queue/:id/report` so it appears in the Agent Dashboard.
 11. **Use Node.js for JSON serialization** on Windows — never inline multi-line content in curl -d.
 12. **Never fabricate query results** — only use data the user has provided.
 13. **TP does not equal confirmed malware** — True Positive means the alert correctly identified suspicious activity requiring response.
