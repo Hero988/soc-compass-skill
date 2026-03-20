@@ -20,21 +20,31 @@ curl -s "$API/ENDPOINT" -H "Authorization: Bearer $KEY"
 
 The user provides their API key (format: `soc_sk_<32hex>`) when invoking this skill.
 
-## Automated scenarios
+## CRITICAL: Schema discovery is MANDATORY
 
-The skill handles these scenarios automatically based on what the user provides:
+**You MUST discover the SIEM schema BEFORE writing ANY investigation query.** Do NOT guess index names, sourcetypes, or field names. Every SIEM instance has different indexes, sourcetypes, and field names. If you skip this step, your queries WILL fail.
+
+The schema tells you:
+- What **indexes** exist (e.g., `corp`, `main`, `wineventlog`)
+- What **sourcetypes** exist (e.g., `WinEventLog`, `WinEventLog:Security`, `xmlwineventlog`)
+- What **fields** are available and their exact names (e.g., `EventCode` vs `event.code` vs `EventID`)
+- How many events each field/index contains
+
+**Without the schema, you are blind. ALWAYS get the schema first.**
+
+## Automated scenarios
 
 ### Scenario A: New investigation
 
-User gives alert + workspace ID. Follow these steps in order:
+User gives alert + workspace ID. Follow these steps **in exact order**:
 
-1. **Get workspace context**
+**Step 1: Get workspace context**
 ```bash
 curl -s "$API/workspaces/{workspaceId}" -H "Authorization: Bearer $KEY"
 ```
 Note the `siemProvider` (splunk/elastic/sentinel), `mode`, `contextInput`, and `dataSource`.
 
-2. **Create conversation**
+**Step 2: Create conversation**
 ```bash
 curl -s -X POST "$API/workspaces/{workspaceId}/conversations" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
@@ -42,40 +52,76 @@ curl -s -X POST "$API/workspaces/{workspaceId}/conversations" \
 ```
 Save the returned `id` as `CONV_ID`.
 
-3. **Check for cached context**
+**Step 3: Check for cached context**
 ```bash
 curl -s "$API/conversations/{CONV_ID}/context" -H "Authorization: Bearer $KEY"
 ```
-If `agentContext` is null, this is a fresh investigation. If it has data, you're resuming.
+If `agentContext` has a `schema` field → you already have the schema, skip to Step 5.
+If `agentContext` is null → this is a fresh investigation, proceed to Step 4.
 
-4. **Schema discovery** (if no cached schema in context)
+**Step 4: MANDATORY schema discovery**
 
-Ask the user directly based on the SIEM provider:
+This step is NON-NEGOTIABLE. You MUST do this before ANY investigation query.
 
-- **Splunk**: "Please run this query in Splunk and paste the results: `index=* NOT index=_* earliest=-30d | head 10000 | fieldsummary maxvals=10 | sort -count | head 60`"
-- **Elastic**: "Please paste 5-10 sample events from Kibana Discover for the relevant index."
-- **Sentinel**: "Please paste 3-5 sample events from Azure Monitor Logs for the relevant table."
+Ask the user directly based on the SIEM provider from Step 1:
 
-After the user provides results, save them in context:
+**Splunk:**
+> Please run this query in Splunk and paste the **full results**:
+> ```
+> index=* NOT index=_* earliest=-30d | head 10000 | fieldsummary maxvals=10 | sort -count | head 60
+> ```
+> This will show me what indexes, sourcetypes, and fields exist in your environment so I can write accurate queries.
+
+**Elastic:**
+> Please go to Kibana Discover, select the relevant index pattern, and paste **5-10 sample events** as JSON. I need to see the actual field names and structure to write correct ES|QL queries.
+
+**Sentinel:**
+> Please run this in Azure Monitor Logs and paste the results:
+> ```
+> search * | summarize count() by $table | sort by count_ desc | take 20
+> ```
+> Then paste **3-5 sample events** from the most relevant table. I need to see the actual field names.
+
+After the user provides the schema results:
+
+1. **Parse the schema carefully** — extract index names, sourcetypes, field names, and event counts
+2. **Save it immediately to context** so you never need to ask again:
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/context" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"schema": {PARSED_SCHEMA}, "provider": "{siemProvider}", "investigationPhase": "initial"}'
+  -d '{
+    "schema": {
+      "provider": "splunk",
+      "indexes": ["corp", "main"],
+      "sourcetypes": ["WinEventLog", "WinEventLog:Security"],
+      "fields": ["EventCode", "ComputerName", "Account_Name", "..."],
+      "rawSchemaOutput": "...the full output from the user..."
+    },
+    "investigationPhase": "schema_complete"
+  }'
 ```
 
-5. **Investigation loop**
+3. **ALL subsequent queries MUST use field names, index names, and sourcetypes from the schema.** Never guess or use defaults.
 
-Formulate SIEM queries based on the alert, schema, and investigation methodology (see `references/alert-triage-methodology.md`). Ask the user to run each query:
+**Step 5: Investigation loop**
 
-"Please run this {SPL/KQL/ESQL} query and paste the results:
-```
-{query}
-```
-**Purpose:** {why this query matters}"
+NOW you can formulate queries — using ONLY the field names, indexes, and sourcetypes from the schema.
 
-Analyze results after each query. Ask follow-up queries as needed. Apply the classification framework after 1-3 initial queries.
+For each query:
+1. Check the schema to confirm the fields you need exist
+2. Use the correct index name from the schema (NOT `index=main` unless the schema shows `main`)
+3. Use the correct sourcetype from the schema
+4. Ask the user to run it and paste results:
 
-6. **Write verdict**
+> Please run this {SPL/KQL/ESQL} query and paste the results:
+> ```
+> {query using schema-verified field names}
+> ```
+> **Purpose:** {why this query matters for the investigation}
+
+Analyze results after each query. Apply the classification framework (see `references/alert-triage-methodology.md`) after 1-3 initial queries.
+
+**Step 6: Write verdict**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/verdict" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
@@ -91,7 +137,7 @@ curl -s -X POST "$API/conversations/{CONV_ID}/verdict" \
 
 Valid verdicts: `True Positive`, `False Positive`, `Suspicious`, `Requires Further Investigation`, `Unknown`
 
-7. **Post report**
+**Step 7: Post report**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/messages" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
@@ -100,12 +146,12 @@ curl -s -X POST "$API/conversations/{CONV_ID}/messages" \
 
 Use the 9-section report format from `references/report-format.md`.
 
-8. **Save context**
+**Step 8: Save full context**
 ```bash
 curl -s -X POST "$API/conversations/{CONV_ID}/context" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{
-    "schema": {...},
+    "schema": {"...saved from Step 4..."},
     "queriesRun": [{"query": "...", "purpose": "...", "resultSummary": "..."}],
     "iocs": [{"value": "...", "type": "ip", "verdict": "malicious"}],
     "mitreTechniques": [{"id": "T1566.001", "name": "...", "evidence": "..."}],
@@ -121,7 +167,7 @@ User references a conversation ID:
 ```bash
 curl -s "$API/conversations/{CONV_ID}/context" -H "Authorization: Bearer $KEY"
 ```
-Read the saved context and resume from where you left off. No need to re-read messages.
+Read the saved context — it already has the schema, queries run, findings, etc. Resume from where you left off. No need to re-read messages or redo schema discovery.
 
 ### Scenario C: General question
 
@@ -167,26 +213,29 @@ Detection rule engineering. Ask for log samples, write Sigma rules. No SIEM quer
 
 If the question doesn't match any mode, answer directly using workspace context.
 
-## SIEM query quick reference
+## SIEM query rules (ONLY use after schema discovery)
 
 **Splunk SPL:**
+- Use index and sourcetype FROM THE SCHEMA — never guess
 - Always use relative time: `earliest=-60m` or `earliest=-24h`
 - End queries with `| head 20`
-- Default: `index=main sourcetype=_json` (adjust per schema)
 - NEVER use absolute timestamps
+- Field names MUST match the schema exactly (case-sensitive)
 
 **Elastic ESQL:**
-- Start with `FROM <index-pattern>`
+- Use index pattern FROM THE SCHEMA
 - Use `==` for equality (double equals)
 - Quote keyword values: `"4624"` not `4624`
-- Time: `WHERE timestamp >= NOW() - 1 hour`
+- Time: `WHERE @timestamp >= NOW() - 1 hour`
 - End with `| LIMIT 20`
+- Field names from schema (e.g., `event.code` not `EventCode`)
 
 **Sentinel KQL:**
-- Start with table name: `SecurityEvent`, `SigninLogs`, etc.
+- Use table names FROM THE SCHEMA
 - Use `==` for equality, `has` for word match, `contains` for substring
 - Time: `| where TimeGenerated > ago(24h)`
 - End with `| take 20`
+- Field names from schema
 
 Full guide: `references/siem-query-guides.md`
 
@@ -232,13 +281,14 @@ All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 
 ## Critical rules
 
-1. **Context is AUTHORITATIVE** — never contradict user-provided workspace context without concrete evidence
-2. **Temporal investigation is MANDATORY** — always check what happened AFTER the alert event
-3. **Classify EARLY** — after 1-3 initial queries, apply the classification framework
-4. **Save context after each major step** — this enables resuming if the session is interrupted
-5. **Post the final report as an assistant message** so it appears in the frontend conversation
-6. **Use the correct SIEM query syntax** for the workspace's provider (SPL/KQL/ESQL)
-7. **Never fabricate query results** — only use data the user has provided
-8. **Follow the 9-section report format** from `references/report-format.md`
-9. **IOCs must be individually verified** — don't assume an IOC is malicious without evidence
-10. **TP does not equal confirmed malware** — True Positive means the alert correctly identified suspicious activity requiring response
+1. **SCHEMA FIRST — NO EXCEPTIONS** — you MUST discover the SIEM schema before writing any investigation query. Never guess index names, sourcetypes, or field names. If you don't have the schema, ask for it.
+2. **Use schema-verified names ONLY** — every index, sourcetype, and field in your queries must come from the schema discovery results. If a field doesn't exist in the schema, don't use it.
+3. **Save schema to context immediately** — after schema discovery, save it so you never need to ask again for this conversation.
+4. **Context is AUTHORITATIVE** — never contradict user-provided workspace context without concrete evidence
+5. **Temporal investigation is MANDATORY** — always check what happened AFTER the alert event
+6. **Classify EARLY** — after 1-3 initial queries, apply the classification framework
+7. **Save context after each major step** — this enables resuming if the session is interrupted
+8. **Post the final report as an assistant message** so it appears in the frontend conversation
+9. **Never fabricate query results** — only use data the user has provided
+10. **Follow the 9-section report format** from `references/report-format.md`
+11. **TP does not equal confirmed malware** — True Positive means the alert correctly identified suspicious activity requiring response
