@@ -144,13 +144,15 @@ NOW you can formulate queries — using ONLY field names, indexes, and sourcetyp
 For each query:
 1. Verify the fields exist in the schema
 2. Use the correct index and sourcetype from the schema
-3. Ask the user to run it:
 
+**HITL mode (default):** Ask the user to run each query:
 > Please run this {SPL/KQL/ESQL} query and paste the results:
 > ```
 > {query using schema-verified field names}
 > ```
 > **Purpose:** {why this query matters}
+
+**Autonomous mode:** Run each query yourself via Chrome — type the query in the SIEM search bar, execute it, and read the results directly.
 
 Analyze results. Apply the classification framework after 1-3 initial queries.
 
@@ -214,9 +216,9 @@ When the user says "first alert" or implies multiple alerts:
 4. For subsequent alerts on the same host, check if existing investigation already covers the activity before running new queries
 5. When an alert is simply a different view of already-investigated activity, classify it based on the evidence already gathered — no redundant queries needed
 
-## Asking the user for information
+## Asking the user for information (HITL mode — default)
 
-Ask the user DIRECTLY in the conversation. No API endpoint needed:
+In the default human-in-the-loop mode, ask the user DIRECTLY in the conversation:
 
 - "Please run this query in your {Splunk/Elastic/Sentinel}: `{query}`"
 - "Please check this IOC in VirusTotal/ThreatFox: `{ioc}`"
@@ -228,6 +230,102 @@ Guidelines:
 - If user provides partial results, ask for clarification
 - If user can't run a query, adapt your approach
 - Save context after each major step (enables resume)
+
+**Note:** If the user requested autonomous mode, skip asking — use Chrome to run queries directly (see "Autonomous Mode" section below).
+
+## Autonomous Mode (Chrome Integration)
+
+**This mode is OPTIONAL and OPT-IN ONLY.** Only activate when the user EXPLICITLY requests automation. If the user does not mention automation, Chrome, autonomous, or browser — use the default HITL mode above and DO NOT mention autonomous mode.
+
+### When to activate
+
+Activate autonomous mode ONLY when the user's message contains phrases like:
+- "do this autonomously" / "automate this" / "fully automated"
+- "use my browser" / "use Chrome"
+- "run the queries yourself" / "you do it"
+- "here's the Splunk/Kibana/Sentinel URL, go ahead"
+- "no human in the loop" / "don't ask me to run queries"
+
+If none of these phrases appear, **stay in HITL mode silently**. Do not suggest or mention autonomous mode.
+
+### Prerequisites
+
+Before using autonomous mode, verify:
+
+1. **Chrome is connected** — the user must have launched Claude Code with `claude --chrome` or typed `/chrome`. If Chrome tools are not available, tell the user:
+   > "Autonomous mode requires Chrome integration. Please run `/chrome` to connect your browser, then try again. Make sure you're logged into the target websites first."
+
+2. **User is logged in** — the AI uses the user's existing Chrome sessions. It cannot log in, handle MFA, or solve CAPTCHAs. If a login page appears, pause and ask the user to log in manually.
+
+### How to use Chrome tools
+
+Use the browser tools provided by the `claude-in-chrome` MCP to interact with websites:
+
+- **Navigate**: Open a URL in a new tab or navigate the current tab
+- **Read**: Read the page content, tables, form values
+- **Click**: Click buttons, links, menu items
+- **Type**: Type text into search boxes, form fields
+- **Screenshot**: Take a screenshot to verify what you see
+- **Multiple tabs**: Open different sites in different tabs (e.g., Splunk in one, VirusTotal in another)
+
+### Autonomous investigation flow
+
+Follow the same investigation steps as HITL mode, but instead of asking the user to run queries, run them yourself via Chrome:
+
+**Schema discovery (Splunk):**
+1. Navigate to the Splunk URL provided by the user
+2. Find and click the "Search & Reporting" app
+3. Clear any existing query in the search bar
+4. Type the schema discovery query: `index=* NOT index=_* earliest=-30d | head 10000 | fieldsummary maxvals=10 | sort -count | head 60`
+5. Click the search button (or press Enter)
+6. Wait for results to load
+7. Read the results table
+8. Save schema to SOC Compass context via API
+
+**Schema discovery (Kibana/Elastic):**
+1. Navigate to the Kibana URL
+2. Go to Discover
+3. Select the relevant index pattern
+4. Read 5-10 sample events to understand the field structure
+5. Save schema to context
+
+**Schema discovery (Sentinel):**
+1. Navigate to the Azure Portal Log Analytics workspace
+2. Run: `search * | summarize count() by $table | sort by count_ desc | take 20`
+3. Read results, then query sample events from the relevant table
+4. Save schema to context
+
+**Running investigation queries:**
+1. Navigate to the SIEM search page (if not already there)
+2. Clear the previous query
+3. Type the new SPL/KQL/ESQL query
+4. Execute the search
+5. Read the results
+6. Analyze and decide next steps
+7. Repeat as needed
+
+**IOC lookups via Chrome:**
+1. Open a new tab
+2. Navigate to VirusTotal (https://www.virustotal.com), ThreatFox, or other threat intel site
+3. Search for the hash/IP/domain
+4. Read the results and detection ratios
+5. Include findings in the investigation
+
+**Handling errors:**
+- If a **login page** appears: pause and ask the user to log in manually, then continue
+- If a **CAPTCHA** appears: pause and ask the user to solve it, then continue
+- If the **page doesn't load** or times out: try refreshing, then ask the user for help
+- If **results are still loading**: wait and check again (SIEM queries can take time)
+
+### Important: Still use the SOC Compass API
+
+Even in autonomous mode, you MUST still:
+- Save schema to conversation context via API
+- Write the verdict via API
+- Post the report as a message via API
+- Save full investigation context via API
+
+Chrome is used to GATHER evidence. The API is used to PERSIST results.
 
 ## Decoding encoded commands
 
@@ -337,3 +435,4 @@ All endpoints require `Authorization: Bearer soc_sk_<key>` except `/health`.
 11. **Use Node.js for JSON serialization** on Windows — never inline multi-line content in curl -d.
 12. **Never fabricate query results** — only use data the user has provided.
 13. **TP does not equal confirmed malware** — True Positive means the alert correctly identified suspicious activity requiring response.
+14. **Autonomous mode is OPT-IN ONLY** — never activate autonomous mode or mention Chrome unless the user explicitly requests automation. Default is always HITL mode.
