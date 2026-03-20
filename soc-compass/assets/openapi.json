@@ -1,0 +1,317 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SOC Compass API",
+    "version": "1.0.0",
+    "description": "Public REST API for SOC Compass — a security investigation platform. Enables external AI agents (Claude Code, Codex, etc.) to conduct investigations programmatically."
+  },
+  "servers": [
+    {
+      "url": "https://astute-cormorant-480.convex.site/api/v1",
+      "description": "Production"
+    }
+  ],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API key with format: soc_sk_<32hex>"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "status": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "severity": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+          "status": { "type": "string", "enum": ["ACTIVE", "RESOLVED", "CLOSED"] },
+          "mode": { "type": "string" },
+          "siemProvider": { "type": "string", "enum": ["splunk", "elastic", "sentinel"] },
+          "dataSource": { "type": "string", "enum": ["siem", "vm", "both", "none"] },
+          "contextInput": { "type": "string" },
+          "contextData": { "type": "string" },
+          "createdAt": { "type": "number" },
+          "updatedAt": { "type": "number" }
+        }
+      },
+      "Conversation": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "workspaceId": { "type": "string" },
+          "title": { "type": "string" },
+          "eventId": { "type": "string" },
+          "mode": { "type": "string" },
+          "status": { "type": "string" },
+          "messageCount": { "type": "integer" },
+          "hasAgentContext": { "type": "boolean" },
+          "agentSource": { "type": "string" },
+          "createdAt": { "type": "number" }
+        }
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "role": { "type": "string", "enum": ["user", "assistant"] },
+          "content": { "type": "string" },
+          "createdAt": { "type": "number" }
+        }
+      },
+      "Verdict": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "eventId": { "type": "string" },
+          "verdict": { "type": "string", "enum": ["True Positive", "False Positive", "Suspicious", "Requires Further Investigation", "Unknown"] },
+          "confidence": { "type": "number" },
+          "escalationRequired": { "type": "boolean" },
+          "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+          "classificationRationale": { "type": "string" },
+          "source": { "type": "string" },
+          "createdAt": { "type": "number" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "security": [],
+        "responses": { "200": { "description": "Service is healthy" } }
+      }
+    },
+    "/me": {
+      "get": {
+        "summary": "Get current user",
+        "tags": ["Account"],
+        "responses": { "200": { "description": "User info" } }
+      }
+    },
+    "/me/credits": {
+      "get": {
+        "summary": "Get credit balance",
+        "tags": ["Account"],
+        "responses": { "200": { "description": "Credit balance" } }
+      }
+    },
+    "/workspaces": {
+      "get": {
+        "summary": "List workspaces",
+        "tags": ["Workspaces"],
+        "responses": { "200": { "description": "List of workspaces" } }
+      },
+      "post": {
+        "summary": "Create workspace",
+        "tags": ["Workspaces"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "description": { "type": "string" },
+                  "siemProvider": { "type": "string", "enum": ["splunk", "elastic", "sentinel"] },
+                  "dataSource": { "type": "string", "enum": ["siem", "vm", "both", "none"] },
+                  "mode": { "type": "string" },
+                  "severity": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Workspace created" } }
+      }
+    },
+    "/workspaces/{workspaceId}": {
+      "get": {
+        "summary": "Get workspace details",
+        "tags": ["Workspaces"],
+        "parameters": [{ "name": "workspaceId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Workspace details including context" } }
+      },
+      "patch": {
+        "summary": "Update workspace",
+        "tags": ["Workspaces"],
+        "parameters": [{ "name": "workspaceId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Workspace updated" } }
+      },
+      "delete": {
+        "summary": "Archive workspace",
+        "tags": ["Workspaces"],
+        "parameters": [{ "name": "workspaceId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Workspace archived" } }
+      }
+    },
+    "/workspaces/{workspaceId}/conversations": {
+      "get": {
+        "summary": "List conversations",
+        "tags": ["Conversations"],
+        "parameters": [{ "name": "workspaceId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "List of conversations" } }
+      },
+      "post": {
+        "summary": "Create conversation",
+        "tags": ["Conversations"],
+        "parameters": [{ "name": "workspaceId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "eventId": { "type": "string" },
+                  "mode": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Conversation created" } }
+      }
+    },
+    "/conversations/{conversationId}": {
+      "get": {
+        "summary": "Get conversation",
+        "tags": ["Conversations"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Conversation details" } }
+      }
+    },
+    "/conversations/{conversationId}/messages": {
+      "get": {
+        "summary": "Get messages",
+        "tags": ["Messages"],
+        "parameters": [
+          { "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50, "maximum": 100 } }
+        ],
+        "responses": { "200": { "description": "Message list" } }
+      },
+      "post": {
+        "summary": "Post message",
+        "description": "Post a message as user or assistant. Does NOT trigger internal AI.",
+        "tags": ["Messages"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["role", "content"],
+                "properties": {
+                  "role": { "type": "string", "enum": ["user", "assistant"] },
+                  "content": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Message posted" } }
+      }
+    },
+    "/conversations/{conversationId}/context": {
+      "get": {
+        "summary": "Get agent context",
+        "description": "Free-form JSON blob stored by the external AI agent.",
+        "tags": ["Context"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Agent context" } }
+      },
+      "post": {
+        "summary": "Save agent context",
+        "description": "Overwrite the agent context with new data.",
+        "tags": ["Context"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "description": "Any JSON object" }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Context saved" } }
+      },
+      "patch": {
+        "summary": "Merge-update context",
+        "description": "Shallow merge new fields into existing context.",
+        "tags": ["Context"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object" }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Context merged" } }
+      }
+    },
+    "/conversations/{conversationId}/verdict": {
+      "get": {
+        "summary": "Get verdicts",
+        "tags": ["Verdicts"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Verdict list" } }
+      },
+      "post": {
+        "summary": "Write verdict",
+        "tags": ["Verdicts"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["eventId", "verdict", "confidence"],
+                "properties": {
+                  "eventId": { "type": "string" },
+                  "verdict": { "type": "string", "enum": ["True Positive", "False Positive", "Suspicious", "Requires Further Investigation", "Unknown"] },
+                  "confidence": { "type": "number" },
+                  "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
+                  "escalationRequired": { "type": "boolean" },
+                  "classificationRationale": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Verdict created" } }
+      }
+    },
+    "/conversations/{conversationId}/status": {
+      "get": {
+        "summary": "Get processing status",
+        "tags": ["Conversations"],
+        "parameters": [{ "name": "conversationId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Conversation status" } }
+      }
+    }
+  }
+}
